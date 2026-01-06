@@ -194,6 +194,36 @@ class Indexer:
                 pass
         return max_h
 
+    async def _fetch_worker(self, queue: asyncio.Queue, start_height: int, end_height: int, fetch_concurrency: int, progress, task):
+        current_height = start_height
+        while current_height <= end_height:
+            batch_end = min(end_height, current_height + fetch_concurrency - 1)
+            count = batch_end - current_height + 1
+            
+            progress.update(task, status=f"⬇️ Fetching {count}")
+            
+            try:
+                # 1. Fetch Hashes
+                heights = list(range(current_height, batch_end + 1))
+                hashes = await asyncio.gather(*[self.rpc.get_block_hash(h) for h in heights])
+                
+                # 2. Fetch Blocks
+                blocks = await asyncio.gather(*[self.rpc.get_block(h, verbosity=2) for h in hashes])
+                
+                # Put blocks into queue
+                for i, block in enumerate(blocks):
+                    await queue.put((heights[i], block))
+                    
+                current_height = batch_end + 1
+            except Exception as e:
+                print(f"[red]Fetch error: {e}[/red]")
+                # Propagate error via queue
+                await queue.put(e)
+                return
+
+        # Signal completion
+        await queue.put(None)
+
     async def sync(self):
         core_height = await self.rpc.get_block_count()
         current_height = self.height
@@ -201,6 +231,8 @@ class Indexer:
         print(f"Index height: {current_height}, Core height: {core_height}")
 
         fetch_concurrency = 50
+        # Increased queue size to buffer more blocks
+        queue = asyncio.Queue(maxsize=fetch_concurrency * 3) 
 
         with Progress(
             SpinnerColumn(),
@@ -213,52 +245,48 @@ class Indexer:
         ) as progress:
             task = progress.add_task("Syncing...", total=core_height, completed=max(0, current_height), status="Starting", block_date="--/--/--")
             
+            # Start fetcher task
+            fetch_task = asyncio.create_task(self._fetch_worker(queue, current_height + 1, core_height, fetch_concurrency, progress, task))
+            
             latencies = []
-            while current_height < core_height:
-                start_height = current_height + 1
-                end_height = min(core_height, current_height + fetch_concurrency)
-                count = end_height - start_height + 1
+            
+            while True:
+                item = await queue.get()
                 
-                # Update status to fetching
-                progress.update(task, status=f"⬇️ Fetching {count}")
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
                 
+                h, block = item
+                
+                # Timing
                 start_time = time.time()
                 
-                # 1. Fetch Hashes in parallel
-                heights = list(range(start_height, end_height + 1))
-                hashes = await asyncio.gather(*[self.rpc.get_block_hash(h) for h in heights])
-                
-                # 2. Fetch Blocks in parallel
-                blocks = await asyncio.gather(*[self.rpc.get_block(h, verbosity=2) for h in hashes])
-                
-                # 3. Process Sequentially
-                for i, block in enumerate(blocks):
-                    h = heights[i]
-                    
-                    # Extract block date
-                    try:
-                        b_time = block.get("time", 0)
-                        date_str = datetime.datetime.fromtimestamp(b_time).strftime('%Y-%m-%d')
-                    except:
-                        date_str = "??"
+                # Extract block date
+                try:
+                    b_time = block.get("time", 0)
+                    date_str = datetime.datetime.fromtimestamp(b_time).strftime('%Y-%m-%d')
+                except:
+                    date_str = "??"
 
-                    # Update status to indexing with date
-                    progress.update(task, completed=h, status="⚙️ Indexing", block_date=date_str)
-                    
-                    self.process_block(block, h)
-                    
-                    if h % 2000 == 0 or h == core_height:
-                        touched = self.save_db()
-                        if touched:
-                            yield touched
-                    
-                batch_time = time.time() - start_time
-                avg_latency = batch_time / count if count > 0 else 0
-                latencies.extend([avg_latency] * count)
-                while len(latencies) > 200: # Keep more for stability with batching
-                    latencies.pop(0)
+                # Update status to indexing with date
+                progress.update(task, completed=h, status="⚙️ Indexing", block_date=date_str)
                 
-                current_height = end_height
+                self.process_block(block, h)
+                
+                if h % 2000 == 0 or h == core_height:
+                    touched = self.save_db()
+                    if touched:
+                        yield touched
+                
+                batch_time = time.time() - start_time
+                avg_latency = batch_time # Per block latency now
+                latencies.append(avg_latency)
+                while len(latencies) > 200:
+                    latencies.pop(0)
+
+            await fetch_task
             
         touched = self.save_db() # Final save
         if touched:
