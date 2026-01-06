@@ -1,0 +1,24 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv
+.env
+env_sample
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Project
+tests/
+data/
+*.md
+Untitled.ipynb
+# We need pyproject.toml and uv.lock for the build, but usually we COPY them explicitly. 
+# However, standard practice often ignores everything and allows specific exceptions 
+# OR ignores specific garbage. 
+# Let's ignore the big stuff.

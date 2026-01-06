@@ -1,6 +1,6 @@
 import pytest
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from src.indexer import Indexer, get_scripthash
 
 # Mock RPC
@@ -9,15 +9,16 @@ class MockRPC:
         return 100
 
     async def get_block_hash(self, height):
-        return "0000000000000000000deadbeef"
+        # Valid 64-char hex
+        return "00000000000000000000000000000000000000000000000000000000deadbeef"
 
-    async def get_block(self, block_hash, verbosity=2):
+    async def get_block(self, block_hash, verbosity=2, **kwargs):
         # Return a dummy block with 1 tx
         return {
             "hash": block_hash,
             "tx": [
                 {
-                    "txid": "tx1",
+                    "txid": "0000000000000000000000000000000000000000000000000000000000000001", # Valid 64-char hex
                     "vin": [{"coinbase": "00"}],
                     "vout": [
                         {
@@ -37,7 +38,8 @@ async def test_scripthash():
     # This is just a smoke test for the function
     sh = get_scripthash("76a914deadbeefdeadbeefdeadbeefdeadbeefdeadbeef88ac")
     assert sh is not None
-    assert len(sh) == 64
+    assert len(sh) == 32
+    assert isinstance(sh, bytes)
 
 @pytest.mark.asyncio
 async def test_indexer_sync(tmp_path):
@@ -64,9 +66,12 @@ async def test_indexer_sync(tmp_path):
         # That's too many for a unit test.
         rpc.get_block_count = AsyncMock(return_value=1)
         
-        # Consume the generator
-        async for _ in indexer.sync():
-            pass
+        # Patch FLUSH_INTERVAL and START_BLOCK
+        with patch("src.indexer.FLUSH_INTERVAL", 1), \
+             patch("src.indexer.Indexer.START_BLOCK", 0):
+            # Consume the generator
+            async for _ in indexer.sync():
+                pass
         
         # Verify headers
         # Note: headers/history are not in-memory objects in the new implementation, 

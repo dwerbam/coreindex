@@ -6,7 +6,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Bitcoin Core RPC
-RPC_URL = os.getenv("BITCOIN_RPC_URL", "http://user:pass@localhost:8332")
+RPC_URLS = [
+    url.strip()
+    for url in os.getenv("BITCOIN_RPC_URL", "https://bitcoin-rpc.publicnode.com").split(",")
+    if url.strip()
+]
 
 # Electrum Server
 HOST = os.getenv("ELECTRUM_HOST", "0.0.0.0")
@@ -17,4 +21,4 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Application Constants
-batch_size = 10  # Blocks to process in parallel/batch
+FLUSH_INTERVAL = 1000  # Blocks to process before flushing to disk
