@@ -7,7 +7,8 @@ class BitcoinRPC:
     def __init__(self):
         self.url = RPC_URL
         self.id_counter = 0
-        self.client = httpx.AsyncClient(timeout=30.0)
+        limits = httpx.Limits(max_keepalive_connections=50, max_connections=200)
+        self.client = httpx.AsyncClient(timeout=30.0, limits=limits)
 
     async def call(self, method: str, params: list = None):
         if params is None:
@@ -21,19 +22,32 @@ class BitcoinRPC:
             "params": params
         }
 
-        try:
-            # Handle Basic Auth if present in URL
-            response = await self.client.post(self.url, json=payload)
-            response.raise_for_status()
-            result = response.json()
-            
-            if result["error"]:
-                raise Exception(f"RPC Error: {result['error']}")
-            
-            return result["result"]
-        except Exception as e:
-            print(f"RPC Call Failed: {method} - {e}")
-            raise
+        retries = 3
+        delay = 1
+        
+        for attempt in range(retries):
+            try:
+                # Handle Basic Auth if present in URL
+                response = await self.client.post(self.url, json=payload)
+                response.raise_for_status()
+                result = response.json()
+                
+                if result["error"]:
+                    raise Exception(f"RPC Error: {result['error']}")
+                
+                return result["result"]
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 503 and attempt < retries - 1:
+                    import asyncio
+                    # print(f"RPC 503 (Busy), retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                    continue
+                print(f"RPC Call Failed: {method} - {e}")
+                raise
+            except Exception as e:
+                print(f"RPC Call Failed: {method} - {e}")
+                raise
 
     async def get_block_count(self):
         return await self.call("getblockcount")
