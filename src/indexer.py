@@ -9,6 +9,27 @@ from rich import print
 from src.config import DATA_DIR
 from src.rpc import BitcoinRPC
 
+class PerformanceMonitor:
+    def __init__(self):
+        self.fetch_wait = 0.0
+        self.process_time = 0.0
+        self.db_write_time = 0.0
+        self.blocks_processed = 0
+        self.start_time = time.time()
+
+    def reset(self):
+        self.fetch_wait = 0.0
+        self.process_time = 0.0
+        self.db_write_time = 0.0
+        self.blocks_processed = 0
+        self.start_time = time.time()
+    
+    def report(self):
+        elapsed = time.time() - self.start_time
+        if elapsed == 0: return ""
+        bps = self.blocks_processed / elapsed
+        return f"[dim]Stats (last {self.blocks_processed}): Wait={self.fetch_wait:.2f}s | Proc={self.process_time:.2f}s | DB={self.db_write_time:.2f}s | {bps:.1f} blk/s[/dim]"
+
 class ETATimeRemainingColumn(TimeRemainingColumn):
     def render(self, task) -> str:
         base = super().render(task)
@@ -231,8 +252,9 @@ class Indexer:
         print(f"Index height: {current_height}, Core height: {core_height}")
 
         fetch_concurrency = 50
-        # Increased queue size to buffer more blocks
         queue = asyncio.Queue(maxsize=fetch_concurrency * 3) 
+        
+        perf = PerformanceMonitor()
 
         with Progress(
             SpinnerColumn(),
@@ -242,16 +264,17 @@ class Indexer:
             TextColumn("[bold yellow]{task.fields[status]}"),
             TextColumn("[dim cyan]{task.fields[block_date]}"),
             ETATimeRemainingColumn(),
+            TextColumn("{task.fields[perf_stats]}"), # Add perf stats column
         ) as progress:
-            task = progress.add_task("Syncing...", total=core_height, completed=max(0, current_height), status="Starting", block_date="--/--/--")
+            task = progress.add_task("Syncing...", total=core_height, completed=max(0, current_height), 
+                                   status="Starting", block_date="--/--/--", perf_stats="")
             
-            # Start fetcher task
             fetch_task = asyncio.create_task(self._fetch_worker(queue, current_height + 1, core_height, fetch_concurrency, progress, task))
             
-            latencies = []
-            
             while True:
+                t0 = time.time()
                 item = await queue.get()
+                perf.fetch_wait += time.time() - t0
                 
                 if item is None:
                     break
@@ -260,9 +283,6 @@ class Indexer:
                 
                 h, block = item
                 
-                # Timing
-                start_time = time.time()
-                
                 # Extract block date
                 try:
                     b_time = block.get("time", 0)
@@ -270,35 +290,37 @@ class Indexer:
                 except:
                     date_str = "??"
 
-                # Update status to indexing with date
                 progress.update(task, completed=h, status="⚙️ Indexing", block_date=date_str)
                 
+                t1 = time.time()
                 self.process_block(block, h)
+                perf.process_time += time.time() - t1
+                perf.blocks_processed += 1
                 
+                if h % 100 == 0: # Update stats every 100 blocks
+                    progress.update(task, perf_stats=perf.report())
+                    perf.reset()
+
                 if h % 2000 == 0 or h == core_height:
+                    t2 = time.time()
                     touched = self.save_db()
+                    perf.db_write_time += time.time() - t2
                     if touched:
                         yield touched
                 
-                batch_time = time.time() - start_time
-                avg_latency = batch_time # Per block latency now
-                latencies.append(avg_latency)
-                while len(latencies) > 200:
-                    latencies.pop(0)
-
             await fetch_task
             
-        touched = self.save_db() # Final save
+        touched = self.save_db()
         if touched:
             yield touched
 
     def process_block(self, block: dict, height: int):
         # 1. Update Headers
-        self.batch_headers.append({
-            "height": height,
-            "hash": block["hash"],
-            "hex": "" # TODO: Construct or fetch header hex
-        })
+        self.batch_headers.append((
+            height,
+            block["hash"],
+            "" # TODO: Construct or fetch header hex
+        ))
 
         for tx in block["tx"]:
             txid = tx["txid"]
@@ -307,12 +329,13 @@ class Indexer:
             for vin in tx["vin"]:
                 if "coinbase" in vin:
                     continue
-                self.batch_spent_outpoints.append({
-                    "tx_hash": vin["txid"], 
-                    "tx_pos": vin["vout"], 
-                    "spending_txid": txid,
-                    "height": height
-                })
+                # (tx_hash, tx_pos, spending_txid, height)
+                self.batch_spent_outpoints.append((
+                    vin["txid"], 
+                    vin["vout"], 
+                    txid,
+                    height
+                ))
                 
             # Outputs (New UTXOs)
             for i, vout in enumerate(tx["vout"]):
@@ -321,50 +344,61 @@ class Indexer:
                 if sh:
                     val = int(vout["value"] * 100_000_000) # Satoshis
                     
-                    self.batch_new_utxos.append({
-                        "scripthash": sh,
-                        "tx_hash": txid,
-                        "tx_pos": i,
-                        "value": val,
-                        "height": height
-                    })
+                    # (scripthash, tx_hash, tx_pos, value, height)
+                    self.batch_new_utxos.append((
+                        sh,
+                        txid,
+                        i,
+                        val,
+                        height
+                    ))
                     
-                    self.batch_history.append({
-                        "scripthash": sh,
-                        "tx_hash": txid,
-                        "height": height
-                    })
+                    # (scripthash, tx_hash, height)
+                    self.batch_history.append((
+                        sh,
+                        txid,
+                        height
+                    ))
 
     def flush_batch(self):
         if not self.batch_headers:
             return set()
 
-        min_h = self.batch_headers[0]['height']
-        max_h = self.batch_headers[-1]['height']
+        min_h = self.batch_headers[0][0]
+        max_h = self.batch_headers[-1][0]
         
         print(f"[bold yellow]Flushing batch {min_h}-{max_h} ({len(self.batch_headers)} blocks)...[/bold yellow]")
 
         # 1. Headers (Partitioned)
-        new_headers = pl.DataFrame(self.batch_headers, schema=self.headers_schema)
+        # Schema: height, hash, hex
+        new_headers = pl.DataFrame(self.batch_headers, schema=["height", "hash", "hex"], orient="row")
+        new_headers = new_headers.cast(self.headers_schema)
         new_headers.write_parquet(DATA_DIR / f"headers_{min_h}_{max_h}.parquet", compression="zstd")
         self.batch_headers = []
 
         # 2. Prepare DataFrames
-        batch_new_utxos_df = pl.DataFrame(self.batch_new_utxos, schema=self.utxo.schema) if self.batch_new_utxos else pl.DataFrame(schema=self.utxo.schema)
+        # UTXO Schema: scripthash, tx_hash, tx_pos, value, height
+        batch_new_utxos_df = pl.DataFrame(self.batch_new_utxos, schema=["scripthash", "tx_hash", "tx_pos", "value", "height"], orient="row") if self.batch_new_utxos else pl.DataFrame(schema=self.utxo.schema)
+        if not batch_new_utxos_df.is_empty():
+            batch_new_utxos_df = batch_new_utxos_df.cast(self.utxo.schema)
         
-        batch_spent_df = pl.DataFrame(self.batch_spent_outpoints, schema={
-            "tx_hash": pl.String, 
-            "tx_pos": pl.UInt32, 
-            "spending_txid": pl.String,
-            "height": pl.Int32
-        }) if self.batch_spent_outpoints else pl.DataFrame(schema={
+        # Spend Schema: tx_hash, tx_pos, spending_txid, height
+        batch_spent_df = pl.DataFrame(self.batch_spent_outpoints, schema=["tx_hash", "tx_pos", "spending_txid", "height"], orient="row") if self.batch_spent_outpoints else pl.DataFrame(schema={
             "tx_hash": pl.String, 
             "tx_pos": pl.UInt32, 
             "spending_txid": pl.String,
             "height": pl.Int32
         })
+        if not batch_spent_df.is_empty():
+            batch_spent_df = batch_spent_df.with_columns([
+                pl.col("tx_hash").cast(pl.String),
+                pl.col("tx_pos").cast(pl.UInt32),
+                pl.col("spending_txid").cast(pl.String),
+                pl.col("height").cast(pl.Int32)
+            ])
 
         batch_history_adds = []
+        # History Schema: scripthash, tx_hash, height
         if self.batch_history:
              batch_history_adds.extend(self.batch_history)
 
@@ -375,11 +409,12 @@ class Indexer:
             
             if not intra_spends.is_empty():
                 for row in intra_spends.iter_rows(named=True):
-                    batch_history_adds.append({
-                        "scripthash": row["scripthash"],
-                        "tx_hash": row["spending_txid"],
-                        "height": row["height_right"] # Height of spending tx
-                    })
+                    # We append tuples for history additions
+                    batch_history_adds.append((
+                        row["scripthash"],
+                        row["spending_txid"],
+                        row["height_right"] # Height of spending tx
+                    ))
                 
                 # Remove spent from new_utxos
                 batch_new_utxos_df = batch_new_utxos_df.join(batch_spent_df, on=["tx_hash", "tx_pos"], how="anti")
@@ -394,11 +429,11 @@ class Indexer:
             
             if not db_spends.is_empty():
                 for row in db_spends.iter_rows(named=True):
-                    batch_history_adds.append({
-                        "scripthash": row["scripthash"],
-                        "tx_hash": row["spending_txid"],
-                        "height": row["height_right"]
-                    })
+                    batch_history_adds.append((
+                        row["scripthash"],
+                        row["spending_txid"],
+                        row["height_right"]
+                    ))
 
                 # Remove spent from DB
                 self.utxo = self.utxo.join(batch_spent_df, on=["tx_hash", "tx_pos"], how="anti")
@@ -411,7 +446,8 @@ class Indexer:
         # Add History (Partitioned)
         touched_scripthashes = set()
         if batch_history_adds:
-            new_hist_df = pl.DataFrame(batch_history_adds, schema=self.history_schema)
+            new_hist_df = pl.DataFrame(batch_history_adds, schema=["scripthash", "tx_hash", "height"], orient="row")
+            new_hist_df = new_hist_df.cast(self.history_schema)
             
             # Add History (Partitioned by Scripthash Prefix - Read Optimized)
             new_hist_df = new_hist_df.with_columns(pl.col("scripthash").str.slice(0, 2).alias("sh_prefix"))
@@ -420,8 +456,10 @@ class Indexer:
                 path.mkdir(parents=True, exist_ok=True)
                 data.drop("sh_prefix").write_parquet(path / f"history_{min_h}_{max_h}.parquet", compression="zstd")
             
+            # For notification, we iterate the adds
+            # Since batch_history_adds is now tuples: (scripthash, tx_hash, height)
             for item in batch_history_adds:
-                touched_scripthashes.add(item['scripthash'])
+                touched_scripthashes.add(item[0])
 
         # Clear batch buffers
         self.batch_new_utxos = []
