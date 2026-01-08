@@ -8,6 +8,7 @@ from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, TimeRemain
 from rich import print
 from src.config import DATA_DIR
 from src.rpc import BitcoinRPC
+from src.p2p import P2PManager
 
 class PerformanceMonitor:
     def __init__(self):
@@ -44,6 +45,7 @@ def get_scripthash(script_hex: str) -> str:
 class Indexer:
     def __init__(self, rpc: BitcoinRPC):
         self.rpc = rpc
+        self.p2p = P2PManager(max_peers=10)
         self.headers_path = DATA_DIR / "headers.parquet"
         self.history_path = DATA_DIR / "history.parquet"
         self.utxo_path = DATA_DIR / "utxo.parquet"
@@ -221,15 +223,15 @@ class Indexer:
             batch_end = min(end_height, current_height + fetch_concurrency - 1)
             count = batch_end - current_height + 1
             
-            progress.update(task, status=f"⬇️ Fetching {count}")
+            progress.update(task, status=f"⬇️ Fetching {count} (P2P)")
             
             try:
-                # 1. Fetch Hashes
+                # 1. Fetch Hashes (RPC)
                 heights = list(range(current_height, batch_end + 1))
                 hashes = await asyncio.gather(*[self.rpc.get_block_hash(h) for h in heights])
                 
-                # 2. Fetch Blocks
-                blocks = await asyncio.gather(*[self.rpc.get_block(h, verbosity=2) for h in hashes])
+                # 2. Fetch Blocks (P2P)
+                blocks = await self.p2p.get_blocks(hashes)
                 
                 # Put blocks into queue
                 for i, block in enumerate(blocks):
@@ -251,8 +253,8 @@ class Indexer:
 
         print(f"Index height: {current_height}, Core height: {core_height}")
 
-        fetch_concurrency = 50
-        queue = asyncio.Queue(maxsize=fetch_concurrency * 3) 
+        fetch_concurrency = 200
+        queue = asyncio.Queue(maxsize=fetch_concurrency * 2) 
         
         perf = PerformanceMonitor()
 

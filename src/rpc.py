@@ -1,11 +1,14 @@
 import httpx
 import base64
 import json
-from src.config import RPC_URL
+import itertools
+import asyncio
+from src.config import RPC_URLS
 
 class BitcoinRPC:
     def __init__(self):
-        self.url = RPC_URL
+        self.urls = RPC_URLS
+        self.url_cycle = itertools.cycle(self.urls)
         self.id_counter = 0
         limits = httpx.Limits(max_keepalive_connections=50, max_connections=200)
         self.client = httpx.AsyncClient(timeout=30.0, limits=limits)
@@ -26,9 +29,12 @@ class BitcoinRPC:
         delay = 1
         
         for attempt in range(retries):
+            # Round-robin selection
+            url = next(self.url_cycle)
+            
             try:
                 # Handle Basic Auth if present in URL
-                response = await self.client.post(self.url, json=payload)
+                response = await self.client.post(url, json=payload)
                 response.raise_for_status()
                 result = response.json()
                 
@@ -38,15 +44,20 @@ class BitcoinRPC:
                 return result["result"]
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 503 and attempt < retries - 1:
-                    import asyncio
-                    # print(f"RPC 503 (Busy), retrying in {delay}s...")
+                    # print(f"RPC 503 (Busy) at {url}, retrying in {delay}s...")
                     await asyncio.sleep(delay)
                     delay *= 2
                     continue
-                print(f"RPC Call Failed: {method} - {e}")
+                print(f"RPC Call Failed at {url}: {method} - {e}")
                 raise
             except Exception as e:
-                print(f"RPC Call Failed: {method} - {e}")
+                # If one node fails, we might want to try another, but simple retry logic handles transient issues.
+                # Ideally we should failover to next URL on connection error.
+                if attempt < retries - 1:
+                     # print(f"RPC connection failed at {url}, retrying...")
+                     await asyncio.sleep(delay)
+                     continue
+                print(f"RPC Call Failed at {url}: {method} - {e}")
                 raise
 
     async def get_block_count(self):
@@ -54,9 +65,6 @@ class BitcoinRPC:
 
     async def get_block_hash(self, height: int):
         return await self.call("getblockhash", [height])
-
-    async def get_block(self, block_hash: str, verbosity: int = 2):
-        return await self.call("getblock", [block_hash, verbosity])
 
     async def get_best_block_hash(self):
         return await self.call("getbestblockhash")

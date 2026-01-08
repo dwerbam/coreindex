@@ -49,6 +49,26 @@ async def test_indexer_sync(tmp_path):
     try:
         rpc = MockRPC()
         indexer = Indexer(rpc)
+        
+        # Mock P2P success
+        fake_block = {
+            "hash": "0000000000000000000deadbeef",
+            "tx": [
+                {
+                    "txid": "tx1",
+                    "vin": [{"coinbase": "00"}],
+                    "vout": [
+                        {
+                            "value": 50.0,
+                            "scriptPubKey": {"hex": "76a914deadbeefdeadbeefdeadbeefdeadbeefdeadbeef88ac"}
+                        }
+                    ]
+                }
+            ],
+            "time": 1234567890
+        }
+        indexer.p2p.get_blocks = AsyncMock(return_value=[fake_block])
+        
         # Fix paths in instance since they are set in __init__ using the global DATA_DIR
         # But wait, we patched the module attribute before init, so it should be fine?
         # Indexer.__init__ uses `from src.config import DATA_DIR` style import?

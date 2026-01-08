@@ -7,6 +7,12 @@ load_dotenv()
 
 # Bitcoin Core RPC
 RPC_URL = os.getenv("BITCOIN_RPC_URL", "http://user:pass@localhost:8332")
+RPC_URLS = os.getenv("BITCOIN_RPC_URLS", RPC_URL).split(",")
+RPC_URLS = [url.strip() for url in RPC_URLS if url.strip()]
+
+# Esplora REST API (Comma separated list)
+ESPLORA_URLS = os.getenv("ESPLORA_URLS", "").split(",")
+ESPLORA_URLS = [url.strip() for url in ESPLORA_URLS if url.strip()]
 
 # Electrum Server
 HOST = os.getenv("ELECTRUM_HOST", "0.0.0.0")
