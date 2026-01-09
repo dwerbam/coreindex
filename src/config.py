@@ -17,4 +17,4 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Application Constants
-batch_size = 10  # Blocks to process in parallel/batch
+# batch_size = 10  # Blocks to process in parallel/batch

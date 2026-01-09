@@ -31,6 +31,19 @@ class ElectrumSession:
         except Exception as e:
             print(f"Failed to notify {self.peer_name}: {e}")
 
+    async def notify_header(self, result):
+        notification = {
+            "jsonrpc": "2.0",
+            "method": "blockchain.headers.subscribe",
+            "params": [result]
+        }
+        try:
+            self.writer.write((json.dumps(notification) + '\n').encode('utf-8'))
+            await self.writer.drain()
+            print(f"[magenta]Header notification sent to {self.peer_name}:[/magenta] height={result.get('height')}")
+        except Exception as e:
+            print(f"Failed to notify header to {self.peer_name}: {e}")
+
     async def handle(self):
         self.server.add_session(self)
         try:
@@ -59,6 +72,7 @@ class ElectrumSession:
             print(f"Connection error {self.peer_name}: {e}")
         finally:
             self.server.remove_session(self)
+            self.server.remove_header_session(self)
             self.writer.close()
             await self.writer.wait_closed()
 
@@ -83,9 +97,18 @@ class ElectrumSession:
             elif method == 'server.ping':
                 result = None
             elif method == 'blockchain.headers.subscribe':
-                best_hash = await self.server.rpc.get_best_block_hash()
-                block_header = await self.server.rpc.call("getblockheader", [best_hash, False])
-                result = {"hex": block_header, "height": self.server.indexer.height}
+                self.server.add_header_session(self)
+                height = self.server.indexer.height
+                if height < 0: height = 0
+                
+                try:
+                    block_hash = await self.server.rpc.get_block_hash(height)
+                    block_header = await self.server.rpc.call("getblockheader", [block_hash, False])
+                    result = {"hex": block_header, "height": height}
+                except Exception as e:
+                    print(f"Error fetching header for subscription: {e}")
+                    result = None
+
             elif method == 'blockchain.block.header':
                 height = params[0]
                 header = self.server.indexer.get_header(height)
@@ -153,12 +176,19 @@ class ElectrumServer:
         self.rpc = BitcoinRPC()
         self.indexer = Indexer(self.rpc)
         self.sessions = set()
+        self.header_subs = set()
         
     def add_session(self, session):
         self.sessions.add(session)
 
     def remove_session(self, session):
         self.sessions.discard(session)
+
+    def add_header_session(self, session):
+        self.header_subs.add(session)
+
+    def remove_header_session(self, session):
+        self.header_subs.discard(session)
 
     async def notify_subscribers(self, touched_scripthashes):
         if not touched_scripthashes:
@@ -186,6 +216,25 @@ class ElectrumServer:
             except Exception as e:
                 print(f"Error notifying session: {e}")
 
+    async def notify_new_block(self):
+        if not self.header_subs:
+            return
+            
+        try:
+            height = self.indexer.height
+            if height < 0: return
+
+            block_hash = await self.rpc.get_block_hash(height)
+            block_header = await self.rpc.call("getblockheader", [block_hash, False])
+            result = {"hex": block_header, "height": height}
+            
+            print(f"[bold cyan]Notifying {len(self.header_subs)} header subscribers of new block {height}...[/bold cyan]")
+            
+            for session in list(self.header_subs):
+                await session.notify_header(result)
+        except Exception as e:
+            print(f"Error in notify_new_block: {e}")
+
     async def start(self):
         asyncio.create_task(self.run_sync())
         server = await asyncio.start_server(
@@ -205,6 +254,7 @@ class ElectrumServer:
                 async for touched in self.indexer.sync():
                     if touched:
                         await self.notify_subscribers(touched)
+                    await self.notify_new_block()
             except Exception as e:
                 print(f"[bold red]Sync error:[/bold red] {e}")
                 # Prevent tight loop on error
