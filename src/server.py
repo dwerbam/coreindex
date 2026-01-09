@@ -84,7 +84,11 @@ class ElectrumSession:
         params = req.get('params', [])
         req_id = req.get('id')
         
-        print(f"[blue]Request:[/blue] {method} id={req_id}")
+        # Log request with params (truncated)
+        params_str = str(params)
+        if len(params_str) > 100:
+            params_str = params_str[:100] + "..."
+        print(f"[blue]Request:[/blue] {method} id={req_id} params={params_str}")
         
         result = None
         error = None
@@ -139,7 +143,8 @@ class ElectrumSession:
                 if not history:
                     result = None
                 else:
-                    history.sort(key=lambda x: x['height'])
+                    # Deterministic sort for status calculation
+                    history.sort(key=lambda x: (x['height'], x['tx_hash']))
                     status_str = ""
                     for item in history:
                         status_str += f"{item['tx_hash']}:{item['height']}:"
@@ -206,7 +211,7 @@ class ElectrumServer:
                     if not history:
                         status = None
                     else:
-                        history.sort(key=lambda x: x['height'])
+                        history.sort(key=lambda x: (x['height'], x['tx_hash']))
                         status_str = ""
                         for item in history:
                             status_str += f"{item['tx_hash']}:{item['height']}:"

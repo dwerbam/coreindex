@@ -484,7 +484,10 @@ class Indexer:
                 return []
                 
             res = pl.scan_parquet(partition_path / "*.parquet").filter(pl.col("scripthash") == scripthash).collect()
-            return [{"tx_hash": r["tx_hash"], "height": r["height"]} for r in res.iter_rows(named=True)]
+            rows = [{"tx_hash": r["tx_hash"], "height": r["height"]} for r in res.iter_rows(named=True)]
+            # Sort by height, then tx_hash for determinism
+            rows.sort(key=lambda x: (x['height'], x['tx_hash']))
+            return rows
         except Exception:
             return []
 
