@@ -9,6 +9,7 @@ from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, TimeRemain
 from rich import print
 from src.config import DATA_DIR, FLUSH_INTERVAL
 from src.rpc import BitcoinRPC
+from src.utxo_db import UtxoDB
 
 class PerformanceMonitor:
     def __init__(self):
@@ -55,7 +56,8 @@ class Indexer:
         self.batch_history = []
         self.batch_new_utxos = []
         self.batch_spent_outpoints = [] # (prev_hash, prev_index, spending_txid, height)
-
+        
+        self.utxo_db = UtxoDB(DATA_DIR)
         self.init_db()
 
     def init_db(self):
@@ -65,16 +67,9 @@ class Indexer:
         # History: scripthash, tx_hash, height (Partitioned storage, just schema here)
         self.history_schema = {"scripthash": pl.String, "tx_hash": pl.String, "height": pl.Int32}
 
-        # UTXOs: scripthash, tx_hash, tx_pos, value, height (Kept in memory)
-        if self.utxo_path.exists():
-            self.utxo = pl.read_parquet(self.utxo_path)
-        else:
-            self.utxo = pl.DataFrame({
-                "scripthash": [], "tx_hash": [], "tx_pos": [], "value": [], "height": []
-            }, schema={"scripthash": pl.String, "tx_hash": pl.String, "tx_pos": pl.UInt32, "value": pl.UInt64, "height": pl.Int32})
-
         # Migration: Rename monolithic files to partitioned format if they exist
-        current_max_h = self.utxo["height"].max() if not self.utxo.is_empty() else 0
+        current_max_h = self.height 
+        if current_max_h == -1: current_max_h = 0
 
         legacy_headers = DATA_DIR / "headers.parquet"
         if legacy_headers.exists():
@@ -90,6 +85,9 @@ class Indexer:
 
         # Migration: Populate address index if missing but history exists
         self.migrate_to_addr_index()
+        
+        if self.utxo_path.exists():
+             print(f"[bold red]WARNING: Found legacy {self.utxo_path}. It is not used anymore. Please delete it to free space.[/bold red]")
 
     def migrate_to_addr_index(self):
         # We don't return early anymore. We check for legacy files and process/delete them.
@@ -192,15 +190,12 @@ class Indexer:
 
     def save_db(self):
         touched = self.flush_batch()
-        self.utxo.write_parquet(self.utxo_path)
+        # self.utxo_db handles writes internally during flush_batch (update)
         return touched
 
     @property
     def height(self) -> int:
-        if not self.utxo.is_empty():
-            return self.utxo["height"].max()
-
-        # Fallback to checking files
+        # Check files to determine height
         files = list(DATA_DIR.glob("headers_*_*.parquet"))
         if not files:
             return -1
@@ -390,9 +385,9 @@ class Indexer:
 
         # 2. Prepare DataFrames
         # UTXO Schema: scripthash, tx_hash, tx_pos, value, height
-        batch_new_utxos_df = pl.DataFrame(self.batch_new_utxos, schema=["scripthash", "tx_hash", "tx_pos", "value", "height"], orient="row") if self.batch_new_utxos else pl.DataFrame(schema=self.utxo.schema)
+        batch_new_utxos_df = pl.DataFrame(self.batch_new_utxos, schema=["scripthash", "tx_hash", "tx_pos", "value", "height"], orient="row") if self.batch_new_utxos else pl.DataFrame(schema=self.utxo_db.schema)
         if not batch_new_utxos_df.is_empty():
-            batch_new_utxos_df = batch_new_utxos_df.cast(self.utxo.schema)
+            batch_new_utxos_df = batch_new_utxos_df.cast(self.utxo_db.schema)
 
         # Spend Schema: tx_hash, tx_pos, spending_txid, height
         batch_spent_df = pl.DataFrame(self.batch_spent_outpoints, schema=["tx_hash", "tx_pos", "spending_txid", "height"], orient="row") if self.batch_spent_outpoints else pl.DataFrame(schema={
@@ -435,25 +430,27 @@ class Indexer:
                 batch_spent_df = batch_spent_df.join(intra_spends.select(["tx_hash", "tx_pos"]), on=["tx_hash", "tx_pos"], how="anti")
 
         # 4. Resolve DB spends (inputs spending outputs from DB)
-        if not batch_spent_df.is_empty() and not self.utxo.is_empty():
-            # Find matches in DB
-            db_spends = self.utxo.join(batch_spent_df, on=["tx_hash", "tx_pos"], how="inner")
+        if not batch_spent_df.is_empty():
+            # Use UtxoDB to find valid spends
+            db_spends = self.utxo_db.resolve_spends(batch_spent_df)
 
             if not db_spends.is_empty():
-                for row in db_spends.iter_rows(named=True):
+                # We join to get the spending_txid from batch_spent_df
+                # db_spends has: scripthash, tx_hash, tx_pos, value, height
+                # batch_spent_df has: tx_hash, tx_pos, spending_txid, height (spending height)
+                
+                joined_spends = db_spends.join(batch_spent_df, on=["tx_hash", "tx_pos"], how="inner")
+                
+                for row in joined_spends.iter_rows(named=True):
                     batch_history_adds.append((
                         row["scripthash"],
                         row["spending_txid"],
-                        row["height_right"]
+                        row["height_right"] # Height of spending tx
                     ))
 
-                # Remove spent from DB
-                self.utxo = self.utxo.join(batch_spent_df, on=["tx_hash", "tx_pos"], how="anti")
-
         # 5. Commit Updates
-        # Add remaining new UTXOs to DB
-        if not batch_new_utxos_df.is_empty():
-            self.utxo = pl.concat([self.utxo, batch_new_utxos_df])
+        # Update UTXO DB (Add new, remove spent)
+        touched_from_spends = self.utxo_db.update(batch_new_utxos_df, batch_spent_df)
 
         # Add History (Partitioned)
         touched_scripthashes = set()
@@ -469,9 +466,11 @@ class Indexer:
                 data.drop("sh_prefix").write_parquet(path / f"history_{min_h}_{max_h}.parquet", compression="zstd")
 
             # For notification, we iterate the adds
-            # Since batch_history_adds is now tuples: (scripthash, tx_hash, height)
             for item in batch_history_adds:
                 touched_scripthashes.add(item[0])
+        
+        # Add touched scripthashes from spends (inputs)
+        touched_scripthashes.update(touched_from_spends)
 
         # Clear batch buffers
         self.batch_new_utxos = []
@@ -486,9 +485,23 @@ class Indexer:
 
     # Queries
     def get_balance(self, scripthash: str):
-        # Confirmed only for this MVP (since we index blocks)
-        res = self.utxo.filter(pl.col("scripthash") == scripthash)
-        confirmed = res["value"].sum()
+        # 1. Get history to find potential TXs
+        history = self.get_history(scripthash)
+        if not history:
+            return {"confirmed": 0, "unconfirmed": 0}
+            
+        tx_hashes = [item["tx_hash"] for item in history]
+        
+        # 2. Fetch UTXOs for these transactions
+        utxos = self.utxo_db.get_utxos_for_tx_hashes(tx_hashes)
+        
+        # 3. Filter by scripthash (since tx may have multiple outputs)
+        if not utxos.is_empty():
+            res = utxos.filter(pl.col("scripthash") == scripthash)
+            confirmed = res["value"].sum()
+        else:
+            confirmed = 0
+            
         return {"confirmed": confirmed, "unconfirmed": 0}
 
     def get_history(self, scripthash: str):
@@ -508,7 +521,21 @@ class Indexer:
             return []
 
     def list_unspent(self, scripthash: str):
-        res = self.utxo.filter(pl.col("scripthash") == scripthash)
+        # 1. Get history
+        history = self.get_history(scripthash)
+        if not history:
+            return []
+            
+        tx_hashes = [item["tx_hash"] for item in history]
+        
+        # 2. Fetch UTXOs
+        utxos = self.utxo_db.get_utxos_for_tx_hashes(tx_hashes)
+        
+        # 3. Filter and format
+        if utxos.is_empty():
+            return []
+            
+        res = utxos.filter(pl.col("scripthash") == scripthash)
         return [{"tx_hash": r["tx_hash"], "tx_pos": r["tx_pos"], "value": r["value"], "height": r["height"]} for r in res.iter_rows(named=True)]
 
     def get_header(self, height: int):

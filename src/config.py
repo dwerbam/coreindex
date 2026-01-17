@@ -21,5 +21,5 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Application Constants
-FLUSH_INTERVAL = 1000  # Blocks to process before flushing to disk
+FLUSH_INTERVAL = 500  # Blocks to process before flushing to disk
 # batch_size = 10  # Blocks to process in parallel/batch

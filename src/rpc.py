@@ -14,7 +14,7 @@ class BitcoinRPC:
         self.active_calls = 0
         limits = httpx.Limits(max_keepalive_connections=15, max_connections=80)
         self.client = httpx.AsyncClient(timeout=60.0, limits=limits)
-        self.cache = PersistentCache(DATA_DIR / "rpc_cache.db")
+        self.cache = PersistentCache(DATA_DIR / "rpc_cache")
 
     def get_stats(self):
         return {
