@@ -1,23 +1,47 @@
 import base64
 import json
-
+import asyncio
 import httpx
 
-from src.config import RPC_URL
+from src.config import RPC_URLS
 
 
 class BitcoinRPC:
     def __init__(self):
-        self.url = RPC_URL
+        self.urls = RPC_URLS
         self.id_counter = 0
-        limits = httpx.Limits(max_keepalive_connections=25, max_connections=150)
-        self.client = httpx.AsyncClient(timeout=40.0, limits=limits)
+        self.active_calls = 0
+        limits = httpx.Limits(max_keepalive_connections=15, max_connections=80)
+        self.client = httpx.AsyncClient(timeout=60.0, limits=limits)
+
+    def get_stats(self):
+        return {
+            "active_calls": self.active_calls,
+            "total_calls": self.id_counter,
+            "servers": len(self.urls)
+        }
+
+    async def _call_single(self, url: str, payload: dict):
+        try:
+            # Handle Basic Auth if present in URL
+            response = await self.client.post(url, json=payload)
+            response.raise_for_status()
+            result = response.json()
+
+            if result["error"]:
+                raise Exception(f"RPC Error: {result['error']}")
+
+            return result["result"]
+        except Exception as e:
+            raise e
 
     async def call(self, method: str, params: list = None):
         if params is None:
             params = []
 
         self.id_counter += 1
+        self.active_calls += 1
+
         payload = {
             "jsonrpc": "1.0",
             "id": f"coreindex-{self.id_counter}",
@@ -25,33 +49,41 @@ class BitcoinRPC:
             "params": params,
         }
 
-        retries = 3
-        delay = 1
+        retries = 10
+        delay = 5
 
-        for attempt in range(retries):
-            try:
-                # Handle Basic Auth if present in URL
-                response = await self.client.post(self.url, json=payload)
-                response.raise_for_status()
-                result = response.json()
+        try:
+            for attempt in range(retries):
+                pending = []
+                for url in self.urls:
+                    pending.append(asyncio.create_task(self._call_single(url, payload)))
 
-                if result["error"]:
-                    raise Exception(f"RPC Error: {result['error']}")
+                errors = []
+                while pending:
+                    done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        try:
+                            result = task.result()
+                            # Success! Cancel others
+                            for p in pending:
+                                p.cancel()
+                            return result
+                        except Exception as e:
+                            errors.append(e)
 
-                return result["result"]
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 503 and attempt < retries - 1:
-                    import asyncio
+                # If we are here, all servers failed for this attempt
+                if attempt == retries - 1:
+                    if errors:
+                        print(f"All RPC servers failed. Last error: {errors[-1]}")
+                        raise errors[-1]
+                    raise Exception("All RPC servers failed with no error captured.")
 
-                    # print(f"RPC 503 (Busy), retrying in {delay}s...")
-                    await asyncio.sleep(delay)
-                    delay *= 2
-                    continue
-                print(f"RPC Call Failed: {method} - {e}")
-                raise
-            except Exception as e:
-                print(f"RPC Call Failed: {method} - {e}")
-                raise
+                # Wait before global retry
+                await asyncio.sleep(delay)
+                delay *= 2
+
+        finally:
+            self.active_calls -= 1
 
     async def get_block_count(self):
         return await self.call("getblockcount")

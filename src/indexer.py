@@ -3,10 +3,11 @@ import hashlib
 import asyncio
 import time
 import datetime
+import gc
 from pathlib import Path
 from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, TimeRemainingColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich import print
-from src.config import DATA_DIR
+from src.config import DATA_DIR, FLUSH_INTERVAL
 from src.rpc import BitcoinRPC
 
 class PerformanceMonitor:
@@ -23,7 +24,7 @@ class PerformanceMonitor:
         self.db_write_time = 0.0
         self.blocks_processed = 0
         self.start_time = time.time()
-    
+
     def report(self):
         elapsed = time.time() - self.start_time
         if elapsed == 0: return ""
@@ -48,19 +49,19 @@ class Indexer:
         self.history_path = DATA_DIR / "history.parquet"
         self.utxo_path = DATA_DIR / "utxo.parquet"
         self.addr_index_path = DATA_DIR / "addr_index"
-        
+
         # Batch buffers
         self.batch_headers = []
         self.batch_history = []
         self.batch_new_utxos = []
         self.batch_spent_outpoints = [] # (prev_hash, prev_index, spending_txid, height)
-        
+
         self.init_db()
 
     def init_db(self):
         # Headers: height, hash, hex (Partitioned storage, just schema here)
         self.headers_schema = {"height": pl.UInt32, "hash": pl.String, "hex": pl.String}
-        
+
         # History: scripthash, tx_hash, height (Partitioned storage, just schema here)
         self.history_schema = {"scripthash": pl.String, "tx_hash": pl.String, "height": pl.Int32}
 
@@ -74,7 +75,7 @@ class Indexer:
 
         # Migration: Rename monolithic files to partitioned format if they exist
         current_max_h = self.utxo["height"].max() if not self.utxo.is_empty() else 0
-        
+
         legacy_headers = DATA_DIR / "headers.parquet"
         if legacy_headers.exists():
             new_name = DATA_DIR / f"headers_0_{current_max_h}.parquet"
@@ -98,29 +99,29 @@ class Indexer:
 
         print(f"[bold yellow]Optimizing storage: Migrating {len(history_files)} history files to address index...[/bold yellow]")
         self.addr_index_path.mkdir(parents=True, exist_ok=True)
-        
+
         for f in history_files:
             try:
                 # Parse range from filename: history_START_END.parquet
                 parts = f.stem.split('_')
                 if len(parts) >= 3:
                     h_min, h_max = parts[1], parts[2]
-                    
+
                     df = pl.read_parquet(f)
                     if not df.is_empty():
                         # Add prefix
                         df = df.with_columns(pl.col("scripthash").str.slice(0, 2).alias("sh_prefix"))
-                        
+
                         # Write partitioned
                         for (prefix,), data in df.partition_by("sh_prefix", as_dict=True).items():
                             path = self.addr_index_path / f"sh_prefix={prefix}"
                             path.mkdir(parents=True, exist_ok=True)
                             data.drop("sh_prefix").write_parquet(path / f"history_{h_min}_{h_max}.parquet", compression="zstd")
-                
+
                 # Delete the legacy file after successful processing (or if empty)
                 f.unlink()
                 print(f"[dim]Migrated and deleted {f.name}[/dim]")
-                
+
             except Exception as e:
                 print(f"[red]Failed to migrate {f}: {e}[/red]")
 
@@ -136,23 +137,23 @@ class Indexer:
             return
 
         print(f"[bold cyan]Compacting {len(prefixes)} address index partitions...[/bold cyan]")
-        
+
         total_files_removed = 0
         total_space_saved = 0
-        
+
         for p in prefixes:
             files = list(p.glob("*.parquet"))
             # Only compact if we have multiple files
             if len(files) <= 1:
                 continue
-                
+
             try:
                 # Calculate original size
                 orig_size = sum(f.stat().st_size for f in files)
-                
+
                 # Load all data
                 df = pl.scan_parquet(p / "*.parquet").collect()
-                
+
                 if df.is_empty():
                     for f in files:
                         f.unlink()
@@ -164,27 +165,27 @@ class Indexer:
                 h_max = df["height"].max()
                 timestamp = int(time.time())
                 new_file = p / f"history_{h_min}_{h_max}_compacted_{timestamp}.parquet"
-                
+
                 # Write compacted file with compression
                 df.write_parquet(new_file, compression="zstd")
-                
+
                 # Verify new file exists
                 if new_file.exists() and new_file.stat().st_size > 0:
                     new_size = new_file.stat().st_size
-                    
+
                     # Delete old files
                     for f in files:
                         if f != new_file:
                             f.unlink()
-                            
+
                     total_files_removed += len(files) - 1
                     total_space_saved += max(0, orig_size - new_size)
                 else:
                     print(f"[red]Failed to verify compacted file for {p.name}, aborting cleanup.[/red]")
-                    
+
             except Exception as e:
                 print(f"[red]Error compacting {p.name}: {e}[/red]")
-        
+
         print(f"[bold green]Compaction complete![/bold green]")
         print(f"Merged files count reduction: {total_files_removed}")
         print(f"Estimated space saved: {total_space_saved / 1024 / 1024:.2f} MB")
@@ -198,12 +199,12 @@ class Indexer:
     def height(self) -> int:
         if not self.utxo.is_empty():
             return self.utxo["height"].max()
-        
+
         # Fallback to checking files
         files = list(DATA_DIR.glob("headers_*_*.parquet"))
         if not files:
             return -1
-        
+
         max_h = -1
         for f in files:
             try:
@@ -220,27 +221,31 @@ class Indexer:
         while current_height <= end_height:
             batch_end = min(end_height, current_height + fetch_concurrency - 1)
             count = batch_end - current_height + 1
-            
-            progress.update(task, status=f"⬇️ Fetching {count}")
-            
-            try:
-                # 1. Fetch Hashes
-                heights = list(range(current_height, batch_end + 1))
-                hashes = await asyncio.gather(*[self.rpc.get_block_hash(h) for h in heights])
-                
-                # 2. Fetch Blocks
-                blocks = await asyncio.gather(*[self.rpc.get_block(h, verbosity=2) for h in hashes])
-                
-                # Put blocks into queue
-                for i, block in enumerate(blocks):
-                    await queue.put((heights[i], block))
-                    
-                current_height = batch_end + 1
-            except Exception as e:
-                print(f"[red]Fetch error: {e}[/red]")
-                # Propagate error via queue
-                await queue.put(e)
-                return
+
+            while True:  # Retry loop for the current batch
+                try:
+                    # Update progress only if not already done in previous retry
+                    progress.update(task, status=f"⬇️ Fetching {count}")
+
+                    # 1. Fetch Hashes
+                    heights = list(range(current_height, batch_end + 1))
+                    hashes = await asyncio.gather(*[self.rpc.get_block_hash(h) for h in heights])
+
+                    # 2. Fetch Blocks
+                    blocks = await asyncio.gather(*[self.rpc.get_block(h, verbosity=2) for h in hashes])
+
+                    # Put blocks into queue
+                    for i, block in enumerate(blocks):
+                        await queue.put((heights[i], block))
+
+                    # Success - move to next batch
+                    current_height = batch_end + 1
+                    break
+
+                except Exception as e:
+                    print(f"[red]Fetch error (retrying in 5s): {e}[/red]")
+                    await asyncio.sleep(5)
+                    # Retry the same batch
 
         # Signal completion
         await queue.put(None)
@@ -252,8 +257,8 @@ class Indexer:
         print(f"Index height: {current_height}, Core height: {core_height}")
 
         fetch_concurrency = 50
-        queue = asyncio.Queue(maxsize=fetch_concurrency * 3) 
-        
+        queue = asyncio.Queue(maxsize=fetch_concurrency * 3)
+
         perf = PerformanceMonitor()
 
         with Progress(
@@ -262,54 +267,61 @@ class Indexer:
             BarColumn(),
             TaskProgressColumn(),
             TextColumn("[bold yellow]{task.fields[status]}"),
-            TextColumn("[dim cyan]{task.fields[block_date]}"),
+            TextColumn("[cyan]{task.fields[block_date]}"),
             ETATimeRemainingColumn(),
             TextColumn("{task.fields[perf_stats]}"), # Add perf stats column
         ) as progress:
-            task = progress.add_task("Syncing...", total=core_height, completed=max(0, current_height), 
+            task = progress.add_task("Syncing...", total=core_height, completed=max(0, current_height),
                                    status="Starting", block_date="--/--/--", perf_stats="")
-            
+
             fetch_task = asyncio.create_task(self._fetch_worker(queue, current_height + 1, core_height, fetch_concurrency, progress, task))
-            
-            while True:
-                t0 = time.time()
-                item = await queue.get()
-                perf.fetch_wait += time.time() - t0
-                
-                if item is None:
-                    break
-                if isinstance(item, Exception):
-                    raise item
-                
-                h, block = item
-                
-                # Extract block date
-                try:
-                    b_time = block.get("time", 0)
-                    date_str = datetime.datetime.fromtimestamp(b_time).strftime('%Y-%m-%d')
-                except:
-                    date_str = "??"
 
-                progress.update(task, completed=h, status="⚙️ Indexing", block_date=date_str)
-                
-                t1 = time.time()
-                self.process_block(block, h)
-                perf.process_time += time.time() - t1
-                perf.blocks_processed += 1
-                
-                if h % 100 == 0: # Update stats every 100 blocks
-                    progress.update(task, perf_stats=perf.report())
-                    perf.reset()
+            try:
+                while True:
+                    t0 = time.time()
+                    item = await queue.get()
+                    perf.fetch_wait += time.time() - t0
 
-                if h % 2000 == 0 or h == core_height:
-                    t2 = time.time()
-                    touched = self.save_db()
-                    perf.db_write_time += time.time() - t2
-                    if touched:
-                        yield touched
-                
-            await fetch_task
-            
+                    if item is None:
+                        break
+
+                    h, block = item
+
+                    # Extract block date
+                    try:
+                        b_time = block.get("time", 0)
+                        date_str = datetime.datetime.fromtimestamp(b_time).strftime('%Y-%m-%d')
+                    except:
+                        date_str = "??"
+
+                    progress.update(task, completed=h, status="⚙️ Indexing", block_date=date_str)
+
+                    t1 = time.time()
+                    self.process_block(block, h)
+                    perf.process_time += time.time() - t1
+                    perf.blocks_processed += 1
+
+                    if h % 100 == 0: # Update stats every 100 blocks
+                        progress.update(task, perf_stats=perf.report())
+                        perf.reset()
+
+                    if h % FLUSH_INTERVAL == 0 or h == core_height:
+                        t2 = time.time()
+                        touched = self.save_db()
+                        perf.db_write_time += time.time() - t2
+                        if touched:
+                            yield touched
+            finally:
+                # Ensure worker is cleaned up
+                if not fetch_task.done():
+                    fetch_task.cancel()
+                    try:
+                        await fetch_task
+                    except asyncio.CancelledError:
+                        pass
+                else:
+                    await fetch_task
+
         touched = self.save_db()
         if touched:
             yield touched
@@ -324,26 +336,26 @@ class Indexer:
 
         for tx in block["tx"]:
             txid = tx["txid"]
-            
+
             # Inputs (Spends)
             for vin in tx["vin"]:
                 if "coinbase" in vin:
                     continue
                 # (tx_hash, tx_pos, spending_txid, height)
                 self.batch_spent_outpoints.append((
-                    vin["txid"], 
-                    vin["vout"], 
+                    vin["txid"],
+                    vin["vout"],
                     txid,
                     height
                 ))
-                
+
             # Outputs (New UTXOs)
             for i, vout in enumerate(tx["vout"]):
                 script_hex = vout["scriptPubKey"]["hex"]
                 sh = get_scripthash(script_hex)
                 if sh:
                     val = int(vout["value"] * 100_000_000) # Satoshis
-                    
+
                     # (scripthash, tx_hash, tx_pos, value, height)
                     self.batch_new_utxos.append((
                         sh,
@@ -352,7 +364,7 @@ class Indexer:
                         val,
                         height
                     ))
-                    
+
                     # (scripthash, tx_hash, height)
                     self.batch_history.append((
                         sh,
@@ -366,7 +378,7 @@ class Indexer:
 
         min_h = self.batch_headers[0][0]
         max_h = self.batch_headers[-1][0]
-        
+
         print(f"[bold yellow]Flushing batch {min_h}-{max_h} ({len(self.batch_headers)} blocks)...[/bold yellow]")
 
         # 1. Headers (Partitioned)
@@ -381,11 +393,11 @@ class Indexer:
         batch_new_utxos_df = pl.DataFrame(self.batch_new_utxos, schema=["scripthash", "tx_hash", "tx_pos", "value", "height"], orient="row") if self.batch_new_utxos else pl.DataFrame(schema=self.utxo.schema)
         if not batch_new_utxos_df.is_empty():
             batch_new_utxos_df = batch_new_utxos_df.cast(self.utxo.schema)
-        
+
         # Spend Schema: tx_hash, tx_pos, spending_txid, height
         batch_spent_df = pl.DataFrame(self.batch_spent_outpoints, schema=["tx_hash", "tx_pos", "spending_txid", "height"], orient="row") if self.batch_spent_outpoints else pl.DataFrame(schema={
-            "tx_hash": pl.String, 
-            "tx_pos": pl.UInt32, 
+            "tx_hash": pl.String,
+            "tx_pos": pl.UInt32,
             "spending_txid": pl.String,
             "height": pl.Int32
         })
@@ -406,7 +418,7 @@ class Indexer:
         if not batch_spent_df.is_empty() and not batch_new_utxos_df.is_empty():
             # Find matches
             intra_spends = batch_new_utxos_df.join(batch_spent_df, on=["tx_hash", "tx_pos"], how="inner")
-            
+
             if not intra_spends.is_empty():
                 for row in intra_spends.iter_rows(named=True):
                     # We append tuples for history additions
@@ -415,10 +427,10 @@ class Indexer:
                         row["spending_txid"],
                         row["height_right"] # Height of spending tx
                     ))
-                
+
                 # Remove spent from new_utxos
                 batch_new_utxos_df = batch_new_utxos_df.join(batch_spent_df, on=["tx_hash", "tx_pos"], how="anti")
-                
+
                 # Remove handled spends from batch_spent_df
                 batch_spent_df = batch_spent_df.join(intra_spends.select(["tx_hash", "tx_pos"]), on=["tx_hash", "tx_pos"], how="anti")
 
@@ -426,7 +438,7 @@ class Indexer:
         if not batch_spent_df.is_empty() and not self.utxo.is_empty():
             # Find matches in DB
             db_spends = self.utxo.join(batch_spent_df, on=["tx_hash", "tx_pos"], how="inner")
-            
+
             if not db_spends.is_empty():
                 for row in db_spends.iter_rows(named=True):
                     batch_history_adds.append((
@@ -448,14 +460,14 @@ class Indexer:
         if batch_history_adds:
             new_hist_df = pl.DataFrame(batch_history_adds, schema=["scripthash", "tx_hash", "height"], orient="row")
             new_hist_df = new_hist_df.cast(self.history_schema)
-            
+
             # Add History (Partitioned by Scripthash Prefix - Read Optimized)
             new_hist_df = new_hist_df.with_columns(pl.col("scripthash").str.slice(0, 2).alias("sh_prefix"))
             for (prefix,), data in new_hist_df.partition_by("sh_prefix", as_dict=True).items():
                 path = self.addr_index_path / f"sh_prefix={prefix}"
                 path.mkdir(parents=True, exist_ok=True)
                 data.drop("sh_prefix").write_parquet(path / f"history_{min_h}_{max_h}.parquet", compression="zstd")
-            
+
             # For notification, we iterate the adds
             # Since batch_history_adds is now tuples: (scripthash, tx_hash, height)
             for item in batch_history_adds:
@@ -465,7 +477,11 @@ class Indexer:
         self.batch_new_utxos = []
         self.batch_history = []
         self.batch_spent_outpoints = []
-        
+
+        # Force garbage collection to free up memory from intermediate DataFrames
+        gc.collect()
+        print(f"[bold green]Batch {min_h}-{max_h} flushed successfully.[/bold green]")
+
         return touched_scripthashes
 
     # Queries
@@ -479,10 +495,10 @@ class Indexer:
         try:
             prefix = scripthash[:2]
             partition_path = self.addr_index_path / f"sh_prefix={prefix}"
-            
+
             if not partition_path.exists():
                 return []
-                
+
             res = pl.scan_parquet(partition_path / "*.parquet").filter(pl.col("scripthash") == scripthash).collect()
             rows = [{"tx_hash": r["tx_hash"], "height": r["height"]} for r in res.iter_rows(named=True)]
             # Sort by height, then tx_hash for determinism
@@ -499,7 +515,7 @@ class Indexer:
         try:
             if not list(DATA_DIR.glob("headers_*.parquet")):
                 return None
-                
+
             res = pl.scan_parquet(DATA_DIR / "headers_*.parquet").filter(pl.col("height") == height).collect()
             if res.is_empty():
                 return None

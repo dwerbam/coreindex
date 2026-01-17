@@ -182,6 +182,7 @@ class ElectrumServer:
         self.indexer = Indexer(self.rpc)
         self.sessions = set()
         self.header_subs = set()
+        self.tasks = set()
         
     def add_session(self, session):
         self.sessions.add(session)
@@ -241,13 +242,34 @@ class ElectrumServer:
             print(f"Error in notify_new_block: {e}")
 
     async def start(self):
-        asyncio.create_task(self.run_sync())
+        sync_task = asyncio.create_task(self.run_sync())
+        monitor_task = asyncio.create_task(self.monitor_status())
+        
+        self.tasks.add(sync_task)
+        self.tasks.add(monitor_task)
+        
+        sync_task.add_done_callback(self.tasks.discard)
+        monitor_task.add_done_callback(self.tasks.discard)
+
         server = await asyncio.start_server(
             self.handle_client, HOST, PORT
         )
         print(f"[bold green]Serving on {HOST}:{PORT}[/bold green]")
         async with server:
             await server.serve_forever()
+
+    async def monitor_status(self):
+        while True:
+            await asyncio.sleep(30)
+            rpc_stats = self.rpc.get_stats()
+            stats = (
+                f"[dim]Status Report: "
+                f"Sessions={len(self.sessions)} | "
+                f"HeaderSubs={len(self.header_subs)} | "
+                f"RPC Active={rpc_stats['active_calls']} | "
+                f"RPC Total={rpc_stats['total_calls']}[/dim]"
+            )
+            print(stats)
 
     async def handle_client(self, reader, writer):
         session = ElectrumSession(reader, writer, self)
