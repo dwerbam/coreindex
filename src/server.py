@@ -244,12 +244,15 @@ class ElectrumServer:
     async def start(self):
         sync_task = asyncio.create_task(self.run_sync())
         monitor_task = asyncio.create_task(self.monitor_status())
+        cleanup_task = asyncio.create_task(self.run_cleanup())
         
         self.tasks.add(sync_task)
         self.tasks.add(monitor_task)
+        self.tasks.add(cleanup_task)
         
         sync_task.add_done_callback(self.tasks.discard)
         monitor_task.add_done_callback(self.tasks.discard)
+        cleanup_task.add_done_callback(self.tasks.discard)
 
         server = await asyncio.start_server(
             self.handle_client, HOST, PORT
@@ -270,6 +273,16 @@ class ElectrumServer:
                 f"RPC Total={rpc_stats['total_calls']}[/dim]"
             )
             print(stats)
+
+    async def run_cleanup(self):
+        while True:
+            try:
+                # Run cleanup on startup and then every hour
+                print("[dim]Running cache cleanup...[/dim]")
+                await self.rpc.cache.cleanup()
+            except Exception as e:
+                print(f"Cache cleanup error: {e}")
+            await asyncio.sleep(3600)
 
     async def handle_client(self, reader, writer):
         session = ElectrumSession(reader, writer, self)
