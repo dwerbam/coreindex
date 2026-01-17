@@ -10,7 +10,8 @@ CoreIndex fetches blocks from Bitcoin Core via RPC and builds a high-performance
 ### 1. Configuration
 Create a `.env` file:
 ```bash
-BITCOIN_RPC_URL=http://user:pass@localhost:8332
+# Supports multiple nodes (comma-separated) for redundancy and speed
+BITCOIN_RPC_URL=http://user:pass@localhost:8332,http://user:pass@backup:8332
 ELECTRUM_HOST=0.0.0.0
 ELECTRUM_PORT=50001
 DATA_DIR=./data

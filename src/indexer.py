@@ -232,7 +232,7 @@ class Indexer:
                     hashes = await asyncio.gather(*[self.rpc.get_block_hash(h) for h in heights])
 
                     # 2. Fetch Blocks
-                    blocks = await asyncio.gather(*[self.rpc.get_block(h, verbosity=2) for h in hashes])
+                    blocks = await asyncio.gather(*[self.rpc.get_block(h, verbosity=2, use_cache=True) for h in hashes])
 
                     # Put blocks into queue
                     for i, block in enumerate(blocks):

@@ -21,7 +21,7 @@ async def test_fetch_worker_retries_on_error(tmp_path):
 
     mock_rpc.get_block_hash.side_effect = get_hash_side_effect
     
-    async def get_block_side_effect(block_hash, verbosity=2):
+    async def get_block_side_effect(block_hash, verbosity=2, **kwargs):
         return {
             "hash": block_hash, 
             "height": 100, # Dummy height
@@ -42,17 +42,18 @@ async def test_fetch_worker_retries_on_error(tmp_path):
             mock_height.return_value = 100
 
             # Patch sleep to run faster
-            with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
+                 patch("src.indexer.FLUSH_INTERVAL", 1):
                 # Run sync
                 # We convert the async generator to a list to run it to completion
                 [_ async for _ in indexer.sync()]
 
-                # Assertions
-                # 1. Verify get_block_hash was called multiple times (retries)
-                assert mock_rpc.get_block_hash.call_count > 5
-                
-                # 2. Verify we actually processed blocks despite the initial error
-                assert indexer.process_block.call_count == 5 # 101 to 105
-                
-                # 3. Verify sleep was called (backoff)
-                assert mock_sleep.call_count > 0
+            # Assertions
+            # 1. Verify get_block_hash was called multiple times (retries)
+            assert mock_rpc.get_block_hash.call_count > 5
+            
+            # 2. Verify we actually processed blocks despite the initial error
+            assert indexer.process_block.call_count == 5 # 101 to 105
+            
+            # 3. Verify sleep was called (backoff)
+            assert mock_sleep.call_count > 0
