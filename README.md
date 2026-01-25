@@ -34,22 +34,30 @@ uv run src/main.py
 
 ## Docker
 
-### 1. Build the Image
+### 1. Run from GitHub Container Registry
+You can pull and run the pre-built image directly from GitHub:
+
 ```bash
-docker build -t coreindex .
+docker pull ghcr.io/dwerbam/coreindex:latest
 ```
 
 ### 2. Run with Persistent Data
 Mount your local `./data` folder to persist the blockchain index:
 ```bash
-docker run -d --restart unless-stopped\
+docker run -d --restart unless-stopped \
   -v $(pwd)/data:/app/data \
   -p 50001:50001 \
   --env-file .env \
   --name coreindex \
-  coreindex
+  ghcr.io/dwerbam/coreindex:latest
 ```
 *Note: Ensure your `.env` file contains a valid `BITCOIN_RPC_URL` reachable from the container.*
+
+### 3. Build Locally (Optional)
+If you prefer to build the image yourself:
+```bash
+docker build -t coreindex .
+```
 
 ## Maintenance (Compact Index)
 ```
