@@ -25,6 +25,8 @@ ELECTRUM_PORT=50001
 DATA_DIR=./data
 # Start height for transaction indexing (pruning). Headers are always fetched.
 INDEX_START_HEIGHT=0
+# Optional: mainnet (default) or testnet
+NETWORK=mainnet
 ```
 
 ### 2. Run the Server
@@ -59,6 +61,38 @@ If you prefer to build the image yourself:
 docker build -t coreindex .
 ```
 
+## Network Support
+
+CoreIndex supports both Mainnet and Testnet. When you change the `NETWORK` environment variable, the server automatically adjusts its default port and indexing start height.
+
+| Network | Default Port | Default Start Height | Description |
+|---------|--------------|----------------------|-------------|
+| `mainnet` | `50001` | `0` | The primary Bitcoin network. |
+| `testnet` | `51001` | `0` | Public test network (Testnet3). |
+
+### Using Testnet
+To run on testnet, simply set the `NETWORK` variable in your `.env`:
+```bash
+NETWORK=testnet
+BITCOIN_RPC_URL=http://user:pass@localhost:18332
+```
+
+**What happens automatically:**
+- **Port**: Changes to `51001` (unless `ELECTRUM_PORT` is explicitly set).
+- **Start Height**: Default is `0` (unless `INDEX_START_HEIGHT` is explicitly set).
+- **Safety Check**: The indexer verifies the Testnet3 genesis block on startup to prevent data corruption.
+
+**Docker Example for Testnet:**
+```bash
+docker run -d --restart unless-stopped \
+  -v $(pwd)/data:/app/data \
+  -p 51001:51001 \
+  --env NETWORK=testnet \
+  --env BITCOIN_RPC_URL=http://... \
+  --name coreindex-testnet \
+  ghcr.io/dwerbam/coreindex:latest
+```
+
 ## Maintenance (Compact Index)
 ```
 
@@ -75,4 +109,6 @@ The server implements the server-side logic for GCS (Golomb-Coded Sets). Clients
 ### Run Tests
 ```bash
 PYTHONPATH=. uv run pytest tests/
+```
+
 ```

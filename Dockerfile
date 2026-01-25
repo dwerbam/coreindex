@@ -33,7 +33,8 @@ ENV PYTHONUNBUFFERED=1
 ENV FORCE_COLOR=1
 
 # Expose the Electrum server port
-EXPOSE 50001
+# 50001: Mainnet, 51001: Testnet
+EXPOSE 50001 51001
 
 # Run the application using the python executable from the venv
 CMD ["python", "src/main.py"]

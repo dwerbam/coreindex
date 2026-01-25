@@ -7,7 +7,7 @@ import gc
 from pathlib import Path
 from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, TimeRemainingColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich import print
-from src.config import DATA_DIR, FLUSH_INTERVAL
+from src.config import DATA_DIR, FLUSH_INTERVAL, INDEX_START_HEIGHT, NETWORK
 from src.rpc import BitcoinRPC
 from src.utxo_db import UtxoDB
 import src.crypto as crypto
@@ -45,7 +45,12 @@ def get_scripthash(script_hex: str) -> bytes:
     return hashlib.sha256(bytes.fromhex(script_hex)).digest()[::-1]
 
 class Indexer:
-    START_BLOCK = 703000
+    START_BLOCK = INDEX_START_HEIGHT
+
+    GENESIS_HASHES = {
+        "mainnet": "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
+        "testnet": "000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943"
+    }
 
     def __init__(self, rpc: BitcoinRPC):
         self.rpc = rpc
@@ -62,6 +67,23 @@ class Indexer:
         
         self.utxo_db = UtxoDB(DATA_DIR)
         self.init_db()
+
+    async def check_network(self):
+        """Verifies that the connected Bitcoin Core node matches the configured network."""
+        try:
+            genesis_hash = await self.rpc.get_block_hash(0)
+            expected = self.GENESIS_HASHES.get(NETWORK)
+            if expected and genesis_hash != expected:
+                print(f"[bold red]CRITICAL NETWORK MISMATCH[/bold red]")
+                print(f"Configured for: [yellow]{NETWORK}[/yellow] (Genesis: {expected})")
+                print(f"Connected node: [red]{genesis_hash}[/red]")
+                raise RuntimeError(f"Network mismatch: Configured {NETWORK} but node has genesis {genesis_hash}")
+            elif not expected:
+                print(f"[yellow]Warning: Unknown network '{NETWORK}', skipping genesis check.[/yellow]")
+        except Exception as e:
+            print(f"[red]Failed to verify network genesis: {e}[/red]")
+            # We don't crash here if RPC fails, might be temporary, but it will likely fail later.
+            raise
 
     def init_db(self):
         self.headers_schema = {"height": pl.UInt32, "hash": pl.Binary, "hex": pl.Binary}
@@ -214,6 +236,7 @@ class Indexer:
         await queue.put(None)
 
     async def sync(self):
+        await self.check_network()
         core_height = await self.rpc.get_block_count()
         current_height = self.height
 

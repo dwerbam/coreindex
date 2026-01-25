@@ -14,7 +14,14 @@ RPC_URLS = [
 
 # Electrum Server
 HOST = os.getenv("ELECTRUM_HOST", "0.0.0.0")
-PORT = int(os.getenv("ELECTRUM_PORT", "50001"))
+NETWORK = os.getenv("NETWORK", "mainnet").lower()
+
+# Network Defaults
+DEFAULT_PORTS = {"mainnet": 50001, "testnet": 51001}
+DEFAULT_START_BLOCKS = {"mainnet": 0, "testnet": 0}
+
+PORT = int(os.getenv("ELECTRUM_PORT", DEFAULT_PORTS.get(NETWORK, 50001)))
+INDEX_START_HEIGHT = int(os.getenv("INDEX_START_HEIGHT", DEFAULT_START_BLOCKS.get(NETWORK, 0)))
 
 # Data Storage
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))

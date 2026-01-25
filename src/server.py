@@ -3,12 +3,12 @@ import json
 import traceback
 import hashlib
 from rich import print
-from src.config import HOST, PORT
+from src.config import HOST, PORT, NETWORK
 from src.rpc import BitcoinRPC
 from src.indexer import Indexer
 
 VERSION = "1.1"
-BANNER = "CoreIndex Electrum Server 1.1 (with BIP-158 & SP Tweaks)"
+BANNER = f"CoreIndex Electrum Server {VERSION} ({NETWORK}) (with BIP-158 & SP Tweaks)"
 
 class ElectrumSession:
     def __init__(self, reader, writer, server):
