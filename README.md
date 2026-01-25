@@ -5,6 +5,8 @@ A lightweight Bitcoin indexer and Electrum server powered by Python and Polars.
 ## Overview
 CoreIndex fetches blocks from Bitcoin Core via RPC and builds a high-performance index of headers, UTXOs, and address history using partitioned Parquet files with Zstd compression. It serves the Electrum protocol (JSON-RPC 2.0 over TCP), making it compatible with wallets like Sparrow.
 
+For a detailed technical explanation of the indexing strategy and architecture, see [How it Works](how_does_it_work.md).
+
 ## Features
 - **Fast Lookups**: Partitioned address index for rapid history retrieval.
 - **BIP-158 Compact Block Filters**: Serves `blockchain.block.get_filter` for modern light clients.
