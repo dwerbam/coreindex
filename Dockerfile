@@ -31,6 +31,7 @@ ENV DATA_DIR=/app/data
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 ENV FORCE_COLOR=1
+ENV COLUMNS=180
 
 # Expose the Electrum server port
 # 50001: Mainnet, 51001: Testnet
