@@ -39,14 +39,9 @@ uv run src/main.py
 ## Docker
 
 ### 1. Run from GitHub Container Registry
-You can pull and run the pre-built image directly from GitHub:
-
-```bash
-docker pull ghcr.io/dwerbam/coreindex:latest
-```
-
-### 2. Run with Persistent Data
+You can pull and run the pre-built image directly from GitHub.
 Mount your local `./data` folder to persist the blockchain index:
+
 ```bash
 docker run -d --restart unless-stopped \
   -v $(pwd)/data:/app/data \

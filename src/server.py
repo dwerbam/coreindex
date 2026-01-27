@@ -124,6 +124,12 @@ class ElectrumSession:
             elif method == 'blockchain.block.get_filter':
                 height = params[0]
                 result = self.server.indexer.get_filter(height)
+            elif method == 'blockchain.silentscanning.get_tweaks':
+                start_height = params[0]
+                count = params[1] if len(params) > 1 else 1
+                if count > 1000:
+                    count = 1000
+                result = self.server.indexer.get_tweaks(start_height, count)
             elif method == 'blockchain.estimatefee':
                 blocks = params[0]
                 res = await self.server.rpc.estimate_smart_fee(blocks)

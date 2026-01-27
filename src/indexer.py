@@ -7,7 +7,7 @@ import gc
 from pathlib import Path
 from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, TimeRemainingColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich import print
-from src.config import DATA_DIR, FLUSH_INTERVAL, INDEX_START_HEIGHT, NETWORK
+from src.config import DATA_DIR, FLUSH_INTERVAL, INDEX_START_HEIGHT, NETWORK, TAPROOT_ACTIVATION
 from src.rpc import BitcoinRPC
 from src.utxo_db import UtxoDB
 import src.crypto as crypto
@@ -328,16 +328,21 @@ class Indexer:
 
         output_scripts = []
 
+        # Taproot Activation Check
+        taproot_active = height >= TAPROOT_ACTIVATION.get(NETWORK, 0)
+
         for tx in block["tx"]:
             txid = tx["txid"]
             txid_bytes = bytes.fromhex(txid)
             
             has_p2tr = False
-            for vout in tx["vout"]:
-                spk = vout["scriptPubKey"]["hex"]
-                if len(spk) == 68 and spk.startswith("5120"):
-                    has_p2tr = True
-                    break
+            # Only check for P2TR if Taproot is active
+            if taproot_active:
+                for vout in tx["vout"]:
+                    spk = vout["scriptPubKey"]["hex"]
+                    if len(spk) == 68 and spk.startswith("5120"):
+                        has_p2tr = True
+                        break
 
             if has_p2tr:
                 input_pubkeys = []
@@ -613,3 +618,48 @@ class Indexer:
             return res["filter"][0].hex()
         except Exception:
             return None
+
+    def get_tweaks(self, start_height: int, count: int = 10):
+        """
+        Fetch tweaks for a range of blocks.
+        Returns a list of dictionaries:
+        [{'height': int, 'block_hash': hex, 'tx_hash': hex, 'tweak': hex}, ...]
+        """
+        # Activation check
+        activation_height = TAPROOT_ACTIVATION.get(NETWORK, 0)
+        if start_height < activation_height:
+            start_height = activation_height
+
+        try:
+            pattern = str(self.tweaks_dir / "tweaks_*.parquet")
+            # Check if any files exist before scanning
+            if not list(self.tweaks_dir.glob("tweaks_*.parquet")):
+                return []
+
+            end_height = start_height + count - 1
+            
+            # Filter by height range
+            res = pl.scan_parquet(pattern) \
+                .filter((pl.col("height") >= start_height) & (pl.col("height") <= end_height)) \
+                .collect()
+
+            if res.is_empty():
+                return []
+
+            # Format result
+            output = []
+            for row in res.iter_rows(named=True):
+                output.append({
+                    "height": row["height"],
+                    "block_hash": row["block_hash"].hex(),
+                    "tx_hash": row["tx_hash"].hex(),
+                    "tweak": row["tweak"].hex()
+                })
+            
+            # Sort by height then tx_hash
+            output.sort(key=lambda x: (x['height'], x['tx_hash']))
+            return output
+
+        except Exception as e:
+            print(f"[red]Error fetching tweaks: {e}[/red]")
+            return []
