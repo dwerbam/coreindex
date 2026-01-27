@@ -247,7 +247,7 @@ class Indexer:
 
         print(f"Index height: {current_height}, Core height: {core_height}")
 
-        fetch_concurrency = 50
+        fetch_concurrency = 10
         queue = asyncio.Queue(maxsize=fetch_concurrency * 3)
 
         perf = PerformanceMonitor()
@@ -288,7 +288,7 @@ class Indexer:
                     progress.update(task, completed=h, status="⚙️ Indexing", block_date=date_str)
 
                     t1 = time.time()
-                    self.process_block(block, h)
+                    await asyncio.to_thread(self.process_block, block, h)
                     perf.process_time += time.time() - t1
                     perf.blocks_processed += 1
 
@@ -298,7 +298,7 @@ class Indexer:
 
                     if h % FLUSH_INTERVAL == 0 or h == core_height:
                         t2 = time.time()
-                        touched = self.save_db()
+                        touched = await asyncio.to_thread(self.save_db)
                         perf.db_write_time += time.time() - t2
                         if touched:
                             yield touched

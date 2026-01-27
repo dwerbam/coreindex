@@ -33,6 +33,7 @@ async def test_fetch_worker_retries_on_error(tmp_path):
 
     with patch("src.indexer.DATA_DIR", tmp_path):
         indexer = Indexer(mock_rpc)
+        indexer.check_network = AsyncMock()
         # Mock DB methods to avoid file I/O
         indexer.process_block = MagicMock()
         indexer.save_db = MagicMock(return_value=set())

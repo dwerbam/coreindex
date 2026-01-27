@@ -59,6 +59,7 @@ async def test_indexer_sync(tmp_path):
         
         # Mocking storage to avoid writing files during test
         indexer.save_db = MagicMock() 
+        indexer.check_network = AsyncMock()
         
         # Run sync for 1 block (current height starts at -1 or 0 if empty)
         # We need to monkeypatch get_block_count or rely on the mock

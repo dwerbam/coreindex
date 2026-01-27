@@ -104,13 +104,16 @@ class ElectrumSession:
                 self.server.add_header_session(self)
                 height = self.server.indexer.height
                 if height < 0: height = 0
+                print(f"[dim]Subscribing to headers at height {height}...[/dim]")
                 
                 try:
                     block_hash = await self.server.rpc.get_block_hash(height)
+                    print(f"[dim]Got block hash: {block_hash}[/dim]")
                     block_header = await self.server.rpc.call("getblockheader", [block_hash, False])
+                    print(f"[dim]Got block header[/dim]")
                     result = {"hex": block_header, "height": height}
                 except Exception as e:
-                    print(f"Error fetching header for subscription: {e}")
+                    print(f"[red]Error fetching header for subscription: {e}[/red]")
                     result = None
 
             elif method == 'blockchain.block.header':
@@ -205,6 +208,26 @@ class ElectrumServer:
     def remove_header_session(self, session):
         self.header_subs.discard(session)
 
+    async def notify_session(self, session, touched_hex):
+        try:
+            # Find overlapping interests
+            matches = session.subscriptions.intersection(touched_hex)
+            for sh in matches:
+                # Calculate new status
+                history = self.indexer.get_history(sh)
+                if not history:
+                    status = None
+                else:
+                    history.sort(key=lambda x: (x['height'], x['tx_hash']))
+                    status_str = ""
+                    for item in history:
+                        status_str += f"{item['tx_hash']}:{item['height']}:"
+                    status = hashlib.sha256(status_str.encode()).hexdigest()
+                
+                await session.notify(sh, status)
+        except Exception as e:
+            print(f"Error notifying session: {e}")
+
     async def notify_subscribers(self, touched_scripthashes):
         if not touched_scripthashes:
             return
@@ -214,25 +237,10 @@ class ElectrumServer:
         # Convert bytes to hex strings for matching with subscriptions
         touched_hex = {s.hex() for s in touched_scripthashes}
 
-        for session in list(self.sessions):
-            try:
-                # Find overlapping interests
-                matches = session.subscriptions.intersection(touched_hex)
-                for sh in matches:
-                    # Calculate new status
-                    history = self.indexer.get_history(sh)
-                    if not history:
-                        status = None
-                    else:
-                        history.sort(key=lambda x: (x['height'], x['tx_hash']))
-                        status_str = ""
-                        for item in history:
-                            status_str += f"{item['tx_hash']}:{item['height']}:"
-                        status = hashlib.sha256(status_str.encode()).hexdigest()
-                    
-                    await session.notify(sh, status)
-            except Exception as e:
-                print(f"Error notifying session: {e}")
+        # Create tasks for all sessions
+        tasks = [self.notify_session(session, touched_hex) for session in list(self.sessions)]
+        if tasks:
+            await asyncio.gather(*tasks)
 
     async def notify_new_block(self):
         if not self.header_subs:
@@ -248,8 +256,9 @@ class ElectrumServer:
             
             print(f"[bold cyan]Notifying {len(self.header_subs)} header subscribers of new block {height}...[/bold cyan]")
             
-            for session in list(self.header_subs):
-                await session.notify_header(result)
+            tasks = [session.notify_header(result) for session in list(self.header_subs)]
+            if tasks:
+                await asyncio.gather(*tasks)
         except Exception as e:
             print(f"Error in notify_new_block: {e}")
 

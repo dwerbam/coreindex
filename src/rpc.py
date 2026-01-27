@@ -12,7 +12,7 @@ class BitcoinRPC:
         self.urls = RPC_URLS
         self.id_counter = 0
         self.active_calls = 0
-        limits = httpx.Limits(max_keepalive_connections=15, max_connections=80)
+        limits = httpx.Limits(max_keepalive_connections=50, max_connections=200)
         self.client = httpx.AsyncClient(timeout=60.0, limits=limits)
         self.cache = PersistentCache(DATA_DIR / "rpc_cache")
 

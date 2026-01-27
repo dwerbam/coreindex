@@ -81,7 +81,9 @@ class UtxoDB:
 
             # Write back
             if not current_df.is_empty():
-                current_df.write_parquet(path, compression="zstd")
+                tmp_path = path.with_suffix(".tmp")
+                current_df.write_parquet(tmp_path, compression="zstd")
+                tmp_path.replace(path) # Atomic replacement
             elif path.exists():
                 path.unlink() # Empty partition
 

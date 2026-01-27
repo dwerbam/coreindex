@@ -36,6 +36,13 @@ NETWORK=mainnet
 uv run src/main.py
 ```
 
+### 3. Silent Payments Benchmark
+CoreIndex includes a benchmark tool to simulate a mobile wallet scanning for Silent Payments. It connects to your running server and scans for tweaks at high speeds (70,000+ tweaks/s).
+```bash
+uv run sp_benchmark.py
+```
+*Note: Use `--testnet` flag if running against a Testnet server.*
+
 ## Docker
 
 ### 1. Run from GitHub Container Registry
@@ -52,7 +59,7 @@ docker run -d --restart unless-stopped \
 ```
 *Note: Ensure your `.env` file contains a valid `BITCOIN_RPC_URL` reachable from the container.*
 
-### 3. Build Locally (Optional)
+### 2. Build Locally (Optional)
 If you prefer to build the image yourself:
 ```bash
 docker build -t coreindex .
@@ -91,6 +98,9 @@ docker run -d --restart unless-stopped \
 ```
 
 ## Maintenance (Compact Index)
+If the address index grows too fragmented (many small Parquet files), you can run a compaction task to merge them:
+```bash
+uv run python -m src.main --compact
 ```
 
 ## Advanced Features
@@ -106,6 +116,4 @@ The server implements the server-side logic for GCS (Golomb-Coded Sets). Clients
 ### Run Tests
 ```bash
 PYTHONPATH=. uv run pytest tests/
-```
-
 ```
