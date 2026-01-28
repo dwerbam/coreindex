@@ -79,6 +79,17 @@ class SilentPaymentClient:
         self.bandwidth.rate_bps = rates.get(name, 0)
         return self.bandwidth.rate_bps
 
+    async def _request_with_retry(self, method, params=None, max_retries=3, initial_timeout=10):
+        timeout = initial_timeout
+        for attempt in range(max_retries):
+            try:
+                return await self.request(method, params, timeout=timeout)
+            except Exception as e:
+                console.print(f"[yellow]Request {method} failed (Attempt {attempt+1}/{max_retries}): {e}. Retrying with {timeout*2}s timeout...[/yellow]")
+                timeout *= 2
+                await asyncio.sleep(1)
+        raise ConnectionError(f"Failed to execute {method} after {max_retries} attempts")
+
     async def connect(self, host: str, port: int):
         self.host = host
         self.port = port
@@ -90,14 +101,14 @@ class SilentPaymentClient:
                 
                 # Get initial banner and version
                 console.print("[dim]Requesting banner...[/dim]")
-                await self.request("server.banner", timeout=5)
+                await self._request_with_retry("server.banner")
                 
                 console.print("[dim]Requesting version...[/dim]")
-                await self.request("server.version", ["ClientPOC", "1.0"], timeout=5)
+                await self._request_with_retry("server.version", ["ClientPOC", "1.0"])
                 
                 # Subscribe to headers to get tip
                 console.print("[dim]Subscribing to headers...[/dim]")
-                res = await self.request("blockchain.headers.subscribe", timeout=10)
+                res = await self._request_with_retry("blockchain.headers.subscribe")
                 if res and 'result' in res:
                     self.chain_tip = res['result'].get('height', 0)
                     
@@ -338,8 +349,8 @@ async def main():
         port = IntPrompt.ask("Server Port", default=DEFAULT_PORT)
         await client.connect(host, port)
         if not client.connected:
-            if not Confirm.ask("Retry connection?"):
-                return
+            console.print("[bold red]Connection attempts exhausted. Exiting.[/bold red]")
+            return
 
     # Main Menu
     while True:

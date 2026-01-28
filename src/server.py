@@ -107,10 +107,14 @@ class ElectrumSession:
                 print(f"[dim]Subscribing to headers at height {height}...[/dim]")
                 
                 try:
+                    t_start = asyncio.get_event_loop().time()
                     block_hash = await self.server.rpc.get_block_hash(height)
-                    print(f"[dim]Got block hash: {block_hash}[/dim]")
+                    print(f"[dim]Got block hash: {block_hash} (took {asyncio.get_event_loop().time() - t_start:.2f}s)[/dim]")
+                    
+                    t_mid = asyncio.get_event_loop().time()
                     block_header = await self.server.rpc.call("getblockheader", [block_hash, False])
-                    print(f"[dim]Got block header[/dim]")
+                    print(f"[dim]Got block header (took {asyncio.get_event_loop().time() - t_mid:.2f}s)[/dim]")
+                    
                     result = {"hex": block_header, "height": height}
                 except Exception as e:
                     print(f"[red]Error fetching header for subscription: {e}[/red]")
